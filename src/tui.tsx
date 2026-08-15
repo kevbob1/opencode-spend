@@ -209,14 +209,20 @@ const money = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 })
 
+function sessionCost(api: TuiPluginApi, sessionID: string) {
+  return api.state.session.messages(sessionID).reduce(
+    (total, message) => total + (message.role === "assistant" ? message.cost : 0),
+    0,
+  )
+}
+
 function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
-  const session = createMemo(() => props.api.state.session.get(props.session_id))
 
   startTracker(props.api, props.session_id)
   const tracker = getTracker(props.session_id)
 
-  const total = createMemo(() => (session()?.cost ?? 0) + tracker.cost())
+  const total = createMemo(() => sessionCost(props.api, props.session_id) + tracker.cost())
 
   return (
     <box>
@@ -232,12 +238,11 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
 function PromptRight(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
-  const session = createMemo(() => props.api.state.session.get(props.session_id))
 
   startTracker(props.api, props.session_id)
   const tracker = getTracker(props.session_id)
 
-  const total = createMemo(() => (session()?.cost ?? 0) + tracker.cost())
+  const total = createMemo(() => sessionCost(props.api, props.session_id) + tracker.cost())
 
   return (
     <text fg={theme().textMuted}>
