@@ -1,8 +1,8 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin, TuiPluginModule, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2"
-import { createSignal, createMemo, onCleanup, type Accessor, type Setter } from "solid-js"
-import { appendFileSync, readFileSync } from "node:fs"
+import { createSignal, createMemo, type Accessor, type Setter } from "solid-js"
+import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -32,69 +32,6 @@ function loadConfig(): SpendConfig {
     // fall back to defaults
   }
   return { ...DEFAULT_CONFIG }
-}
-
-// Lightweight perf instrumentation. Enabled when SPEND_DEBUG is set. Rather than
-// logging every event (which itself can dominate CPU), we aggregate counters and
-// flush a one-line summary on an interval, plus immediately flag pathological
-// signals (very frequent refreshes, slow tree walks, coalesce backpressure).
-const DEBUG = !!process.env.SPEND_DEBUG
-const DEBUG_LOG = "/tmp/spend-debug.log"
-
-function logLine(msg: string) {
-  if (!DEBUG) return
-  try {
-    appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${msg}\n`)
-  } catch {
-    // ignore
-  }
-}
-
-type Metrics = {
-  events: number
-  refreshes: number
-  coalesced: number
-  walkTotalMs: number
-  walkMaxMs: number
-  trackerCount: number
-}
-
-const metrics: Metrics = {
-  events: 0,
-  refreshes: 0,
-  coalesced: 0,
-  walkTotalMs: 0,
-  walkMaxMs: 0,
-  trackerCount: 0,
-}
-
-let metricsTimer: ReturnType<typeof setInterval> | undefined
-
-function startMetricsLoop() {
-  if (!DEBUG || metricsTimer) return
-  metricsTimer = setInterval(() => {
-    const avgWalk = metrics.refreshes > 0 ? metrics.walkTotalMs / metrics.refreshes : 0
-    logLine(
-      `[metrics 5s] events=${metrics.events} refreshes=${metrics.refreshes} ` +
-        `coalesced=${metrics.coalesced} avgWalkMs=${avgWalk.toFixed(1)} ` +
-        `maxWalkMs=${metrics.walkMaxMs.toFixed(1)} trackers=${metrics.trackerCount}`,
-    )
-    // Flag suspicious throughput: a healthy idle tracker should be ~0 refreshes.
-    if (metrics.refreshes > 50) {
-      logLine(`[WARN] high refresh rate this window: ${metrics.refreshes} (possible loop)`) 
-    }
-    if (metrics.walkMaxMs > 500) {
-      logLine(`[WARN] slow tree walk: ${metrics.walkMaxMs.toFixed(0)}ms`)
-    }
-    metrics.events = 0
-    metrics.refreshes = 0
-    metrics.coalesced = 0
-    metrics.walkTotalMs = 0
-    metrics.walkMaxMs = 0
-  }, 5000)
-  if (typeof metricsTimer === "object" && "unref" in metricsTimer) {
-    ;(metricsTimer as { unref: () => void }).unref()
-  }
 }
 
 async function sumDescendants(
@@ -154,27 +91,18 @@ function startTracker(api: TuiPluginApi, sessionID: string) {
   let dirty = false
   let disposed = false
 
-  metrics.trackerCount = trackers.size
-  startMetricsLoop()
-
   async function refresh() {
     if (disposed) return
     if (inFlight) {
       dirty = true
-      metrics.coalesced++
       return
     }
     inFlight = true
     dirty = false
-    const t0 = Date.now()
     try {
       const total = await sumDescendants(api.client, sessionID, new Set(), 0)
       if (!disposed) tracker.setCost(total)
     } finally {
-      const elapsed = Date.now() - t0
-      metrics.refreshes++
-      metrics.walkTotalMs += elapsed
-      if (elapsed > metrics.walkMaxMs) metrics.walkMaxMs = elapsed
       inFlight = false
       if (dirty && !disposed) void refresh()
     }
@@ -185,7 +113,6 @@ function startTracker(api: TuiPluginApi, sessionID: string) {
   // have changed, so recompute the tree (coalesced to avoid pile-up).
   const handler = () => {
     if (disposed) return
-    metrics.events++
     void refresh()
   }
   const offMessage = api.event.on("message.updated", handler as never)
@@ -196,7 +123,6 @@ function startTracker(api: TuiPluginApi, sessionID: string) {
     offMessage()
     offIdle()
     trackers.delete(sessionID)
-    metrics.trackerCount = trackers.size
   }
 
   void refresh()
