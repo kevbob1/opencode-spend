@@ -1,6 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import type { TuiPlugin, TuiPluginModule, TuiPluginApi } from "@opencode-ai/plugin/tui"
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createSignal, createMemo, type Accessor, type Setter } from "solid-js"
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -34,8 +33,11 @@ function loadConfig(): SpendConfig {
   return { ...DEFAULT_CONFIG }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyClient = any
+
 async function sumDescendants(
-  client: OpencodeClient,
+  client: AnyClient,
   sessionID: string,
   visited: Set<string>,
   depth: number,
@@ -45,8 +47,8 @@ async function sumDescendants(
   visited.add(sessionID)
   try {
     const result = await client.session.children({ sessionID })
-    const children = (result.data ?? []).filter((s) => !visited.has(s.id))
-    const ownCost = children.reduce((sum, s) => sum + (s.cost ?? 0), 0)
+    const children = (result.data ?? []).filter((s: { id: string }) => !visited.has(s.id))
+    const ownCost = children.reduce((sum: number, s: { cost?: number }) => sum + (s.cost ?? 0), 0)
     let nested = 0
     for (const child of children) {
       nested += await sumDescendants(client, child.id, visited, depth + 1)
@@ -80,54 +82,6 @@ function getTracker(sessionID: string): Tracker {
   return tracker
 }
 
-// Begin watching a session's subagent spend. Guarded by `started` so it only
-// ever runs once per tracker no matter how often the view mounts.
-function startTracker(api: TuiPluginApi, sessionID: string) {
-  const tracker = getTracker(sessionID)
-  if (tracker.started) return
-  tracker.started = true
-
-  let inFlight = false
-  let dirty = false
-  let disposed = false
-
-  async function refresh() {
-    if (disposed) return
-    if (inFlight) {
-      dirty = true
-      return
-    }
-    inFlight = true
-    dirty = false
-    try {
-      const total = await sumDescendants(api.client, sessionID, new Set(), 0)
-      if (!disposed) tracker.setCost(total)
-    } finally {
-      inFlight = false
-      if (dirty && !disposed) void refresh()
-    }
-  }
-
-  // Subagent message.updated events DO reach api.event.on (verified), carrying
-  // the subagent's own sessionID. Any such event means a descendant's spend may
-  // have changed, so recompute the tree (coalesced to avoid pile-up).
-  const handler = () => {
-    if (disposed) return
-    void refresh()
-  }
-  const offMessage = api.event.on("message.updated", handler as never)
-  const offIdle = api.event.on("session.idle", handler as never)
-
-  tracker.dispose = () => {
-    disposed = true
-    offMessage()
-    offIdle()
-    trackers.delete(sessionID)
-  }
-
-  void refresh()
-}
-
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -135,69 +89,198 @@ const money = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 })
 
-function sessionCost(api: TuiPluginApi, sessionID: string) {
-  return api.state.session.messages(sessionID).reduce(
-    (total, message) => total + (message.role === "assistant" ? message.cost : 0),
-    0,
-  )
+function getSessionID(context: ReturnType<typeof usePlugin>): string | undefined {
+  const route = context.ui.router.current()
+  if (route.type === "session") {
+    return route.sessionID
+  }
+  return undefined
 }
 
-function View(props: { api: TuiPluginApi; session_id: string }) {
-  const theme = () => props.api.theme.current
+function View() {
+  const context = usePlugin()
+  const theme = context.theme
 
-  startTracker(props.api, props.session_id)
-  const tracker = getTracker(props.session_id)
+  const sessionID = createMemo(() => getSessionID(context))
 
-  const total = createMemo(() => sessionCost(props.api, props.session_id) + tracker.cost())
+  const tracker = createMemo(() => {
+    const id = sessionID()
+    if (!id) return getTracker("")
+    return getTracker(id)
+  })
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const contextClient: AnyClient = context.client
+
+  // Begin watching a session's subagent spend. Guarded by `started` so it only
+  // ever runs once per tracker no matter how often the view mounts.
+  createMemo(() => {
+    const id = sessionID()
+    if (!id) return
+    const trackerInstance = getTracker(id)
+    if (trackerInstance.started) return
+    trackerInstance.started = true
+
+    let inFlight = false
+    let dirty = false
+    let disposed = false
+
+    async function refresh() {
+      if (disposed) return
+      if (inFlight) {
+        dirty = true
+        return
+      }
+      inFlight = true
+      dirty = false
+      try {
+        const total = await sumDescendants(contextClient, id!, new Set(), 0)
+        if (!disposed) trackerInstance.setCost(total)
+      } finally {
+        inFlight = false
+        if (dirty && !disposed) void refresh()
+      }
+    }
+
+    // Subagent events may indicate a descendant's spend changed, so recompute the tree
+    // (coalesced to avoid pile-up).
+    const handler = () => {
+      if (disposed) return
+      void refresh()
+    }
+    // Use session idle event as a proxy for when subagent costs are finalized
+    const offIdle = context.data.on("session.idle" as any, handler)
+
+    trackerInstance.dispose = () => {
+      disposed = true
+      offIdle()
+      trackers.delete(id!)
+    }
+
+    void refresh()
+  })
+
+  const total = createMemo(() => {
+    const id = sessionID()
+    if (!id) return 0
+    const messages = context.data.session.message.list(id) ?? []
+    const sessionCost = messages.reduce(
+      (total: number, message: any) => total + (message.role === "assistant" ? message.cost ?? 0 : 0),
+      0,
+    )
+    return sessionCost + tracker().cost()
+  })
 
   return (
     <box>
-      <text fg={theme().text}>
+      <text fg={theme.text}>
         <b>Total Spend</b>
       </text>
-      <text fg={theme().textMuted}>
-        {money.format(total())} ({money.format(tracker.cost())})
+      <text fg={theme.textMuted}>
+        {money.format(total())} ({money.format(tracker().cost())})
       </text>
     </box>
   )
 }
 
-function PromptRight(props: { api: TuiPluginApi; session_id: string }) {
-  const theme = () => props.api.theme.current
+function PromptFooter() {
+  const context = usePlugin()
+  const theme = context.theme
 
-  startTracker(props.api, props.session_id)
-  const tracker = getTracker(props.session_id)
+  const sessionID = createMemo(() => getSessionID(context))
 
-  const total = createMemo(() => sessionCost(props.api, props.session_id) + tracker.cost())
+  const tracker = createMemo(() => {
+    const id = sessionID()
+    if (!id) return getTracker("")
+    return getTracker(id)
+  })
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const contextClient: AnyClient = context.client
+
+  // Begin watching a session's subagent spend. Guarded by `started` so it only
+  // ever runs once per tracker no matter how often the view mounts.
+  createMemo(() => {
+    const id = sessionID()
+    if (!id) return
+    const trackerInstance = getTracker(id)
+    if (trackerInstance.started) return
+    trackerInstance.started = true
+
+    let inFlight = false
+    let dirty = false
+    let disposed = false
+
+    async function refresh() {
+      if (disposed) return
+      if (inFlight) {
+        dirty = true
+        return
+      }
+      inFlight = true
+      dirty = false
+      try {
+        const total = await sumDescendants(contextClient, id!, new Set(), 0)
+        if (!disposed) trackerInstance.setCost(total)
+      } finally {
+        inFlight = false
+        if (dirty && !disposed) void refresh()
+      }
+    }
+
+    const handler = () => {
+      if (disposed) return
+      void refresh()
+    }
+    const offIdle = context.data.on("session.idle" as any, handler)
+
+    trackerInstance.dispose = () => {
+      disposed = true
+      offIdle()
+      trackers.delete(id!)
+    }
+
+    void refresh()
+  })
+
+  const total = createMemo(() => {
+    const id = sessionID()
+    if (!id) return 0
+    const messages = context.data.session.message.list(id) ?? []
+    const sessionCost = messages.reduce(
+      (total: number, message: any) => total + (message.role === "assistant" ? message.cost ?? 0 : 0),
+      0,
+    )
+    return sessionCost + tracker().cost()
+  })
 
   return (
-    <text fg={theme().textMuted}>
-      {money.format(total())} ({money.format(tracker.cost())})
+    <text fg={theme.textMuted}>
+      {money.format(total())} ({money.format(tracker().cost())})
     </text>
   )
 }
 
-const tui: TuiPlugin = async (api) => {
-  const config = loadConfig()
-  const showSidebar = config.location === "both" || config.location === "sidebar"
-  const showPrompt = config.location === "both" || config.location === "prompt"
-
-  const slots: Parameters<typeof api.slots.register>[0]["slots"] = {}
-  if (showSidebar) {
-    slots.sidebar_content = (_ctx, props) => <View api={api} session_id={props.session_id} />
-  }
-  if (showPrompt) {
-    slots.session_prompt_right = (_ctx, props) => (
-      <PromptRight api={api} session_id={props.session_id} />
-    )
-  }
-
-  api.slots.register({ id: "spend", order: 150, slots } as unknown as Parameters<typeof api.slots.register>[0])
-}
-
-const plugin: TuiPluginModule & { id: string } = {
+export default Plugin.define({
   id: "spend",
-  tui,
-}
+  setup(context) {
+    const config = loadConfig()
+    const showSidebar = config.location === "both" || config.location === "sidebar"
+    const showPrompt = config.location === "both" || config.location === "prompt"
 
-export default plugin
+    if (showSidebar) {
+      context.ui.slot({
+        append: "sidebar.content",
+        render: () => <View />,
+      })
+    }
+
+    if (showPrompt) {
+      // Use prompt.footer.status for the prompt footer right area
+      context.ui.slot({
+        append: "prompt.footer.status",
+        render: () => <PromptFooter />,
+      })
+    }
+  },
+})

@@ -33,16 +33,16 @@
     "LICENSE"
   ],
   "engines": {
-    "opencode": ">=1.17.15"
+    "opencode": ">=2.0.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.17.15",
-    "@opentui/core": ">=0.4.5",
-    "@opentui/keymap": ">=0.4.5",
-    "@opentui/solid": ">=0.4.5",
+    "@opencode/plugin": ">=2.0.0",
+    "@opentui/core": ">=0.5.8",
+    "@opentui/keymap": ">=0.5.8",
+    "@opentui/solid": ">=0.5.8",
     "solid-js": ">=1.9.10"
   },
   "peerDependenciesMeta": {
@@ -60,8 +60,8 @@
     }
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.18.1",
-    "@opencode-ai/sdk": "^1.18.1",
+    "@opencode/plugin": "^2.0.0",
+    "@opencode/client": "^2.0.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   }
