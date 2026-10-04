@@ -24,7 +24,10 @@
     "url": "https://gitlab.com/jwoodwardgl/opencode-spend/-/issues"
   },
   "exports": {
-    "./tui": "./src/tui.tsx"
+    ".": "./src/tui.ts",
+    "./tui": {
+      "import": "./src/tui.ts"
+    }
   },
   "files": [
     "src",
@@ -40,18 +43,10 @@
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.0",
-    "@opentui/core": ">=0.5.8",
-    "@opentui/keymap": ">=0.5.8",
     "@opentui/solid": ">=0.5.8",
     "solid-js": ">=1.9.10"
   },
   "peerDependenciesMeta": {
-    "@opentui/core": {
-      "optional": true
-    },
-    "@opentui/keymap": {
-      "optional": true
-    },
     "@opentui/solid": {
       "optional": true
     },

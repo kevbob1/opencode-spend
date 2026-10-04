@@ -1,6 +1,6 @@
-/** @jsxImportSource @opentui/solid */
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { createSignal, createMemo, type Accessor, type Setter } from "solid-js"
+import { jsx, jsxs } from "@opentui/solid/jsx-runtime"
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -171,16 +171,26 @@ function View() {
     return sessionCost + tracker().cost()
   })
 
-  return (
-    <box>
-      <text fg={theme.text}>
-        <b>Total Spend</b>
-      </text>
-      <text fg={theme.textMuted}>
-        {money.format(total())} ({money.format(tracker().cost())})
-      </text>
-    </box>
-  )
+  return jsxs("box", {
+    children: [
+      jsx("text", {
+        get fg() {
+          return theme.text
+        },
+        get children() {
+          return jsx("b", { children: "Total Spend" })
+        },
+      }),
+      jsx("text", {
+        get fg() {
+          return theme.textMuted
+        },
+        get children() {
+          return `${money.format(total())} (${money.format(tracker().cost())})`
+        },
+      }),
+    ],
+  })
 }
 
 function PromptFooter() {
@@ -254,11 +264,14 @@ function PromptFooter() {
     return sessionCost + tracker().cost()
   })
 
-  return (
-    <text fg={theme.textMuted}>
-      {money.format(total())} ({money.format(tracker().cost())})
-    </text>
-  )
+  return jsx("text", {
+    get fg() {
+      return theme.textMuted
+    },
+    get children() {
+      return `${money.format(total())} (${money.format(tracker().cost())})`
+    },
+  })
 }
 
 export default Plugin.define({
@@ -271,7 +284,7 @@ export default Plugin.define({
     if (showSidebar) {
       context.ui.slot({
         append: "sidebar.content",
-        render: () => <View />,
+        render: () => jsx(View, {}),
       })
     }
 
@@ -279,7 +292,7 @@ export default Plugin.define({
       // Use prompt.footer.status for the prompt footer right area
       context.ui.slot({
         append: "prompt.footer.status",
-        render: () => <PromptFooter />,
+        render: () => jsx(PromptFooter, {}),
       })
     }
   },

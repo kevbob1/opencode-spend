@@ -22,18 +22,20 @@
 
 ## Installation
 
-Add `opencode-spend` to the `plugin` array in your TUI config:
+Add `opencode-spend` to the `plugin` array in your opencode config:
 
-**`~/.config/opencode/tui.json`** (global) or **`.opencode/tui.json`** (project)
+**`~/.config/opencode/opencode.json`** (global) or **`opencode.json`** (project)
 
 ```json
 {
-  "$schema": "https://opencode.ai/tui.json",
+  "$schema": "https://opencode.ai/config.json",
   "plugin": ["opencode-spend"]
 }
 ```
 
 Restart opencode — it installs the plugin automatically via Bun. The **Total Spend** section appears in the sidebar between Context and MCP, and a compact total appears at the right of the prompt footer.
+
+> **Note:** `~/.config/opencode/cli.json` is only needed to survive remote-server connections. The legacy `tui.json` is opencode v1-only — v2 uses `opencode.json` for both local and TUI plugins.
 
 ---
 
@@ -79,11 +81,11 @@ cd opencode-spend
 bun install
 ```
 
-Reference it with a `file://` URL in your `tui.json`:
+Reference it with a `file://` URL in your `opencode.json`:
 
 ```json
 {
-  "$schema": "https://opencode.ai/tui.json",
+  "$schema": "https://opencode.ai/config.json",
   "plugin": ["file:///absolute/path/to/opencode-spend"]
 }
 ```
