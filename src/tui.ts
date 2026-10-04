@@ -1,5 +1,5 @@
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
-import { createSignal, createMemo, type Accessor, type Setter } from "solid-js"
+import { createEffect, createMemo, onCleanup } from "solid-js"
 import { jsx, jsxs } from "@opentui/solid/jsx-runtime"
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -35,52 +35,8 @@ function loadConfig(): SpendConfig {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyClient = any
-
-async function sumDescendants(
-  client: AnyClient,
-  sessionID: string,
-  visited: Set<string>,
-  depth: number,
-): Promise<number> {
-  if (depth > 10) return 0
-  if (visited.has(sessionID)) return 0
-  visited.add(sessionID)
-  try {
-    const result = await client.session.children({ sessionID })
-    const children = (result.data ?? []).filter((s: { id: string }) => !visited.has(s.id))
-    const ownCost = children.reduce((sum: number, s: { cost?: number }) => sum + (s.cost ?? 0), 0)
-    let nested = 0
-    for (const child of children) {
-      nested += await sumDescendants(client, child.id, visited, depth + 1)
-    }
-    return ownCost + nested
-  } catch {
-    return 0
-  }
-}
-
-// One tracker per orchestrator session, created exactly ONCE and stored at
-// module scope. The slot renderer can be invoked many times, so all stateful
-// setup (event subscription, polling) lives here behind a strict guard. The
-// previous version created this inside the render body, which re-ran on every
-// reactive update and produced an infinite refresh loop plus a listener leak.
-type Tracker = {
-  cost: Accessor<number>
-  setCost: Setter<number>
-  started: boolean
-  dispose: () => void
-}
-
-const trackers = new Map<string, Tracker>()
-
-function getTracker(sessionID: string): Tracker {
-  let tracker = trackers.get(sessionID)
-  if (tracker) return tracker
-  const [cost, setCost] = createSignal(0)
-  tracker = { cost, setCost, started: false, dispose: () => {} }
-  trackers.set(sessionID, tracker)
-  return tracker
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyData = any
 
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -89,87 +45,100 @@ const money = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 })
 
-function getSessionID(context: ReturnType<typeof usePlugin>): string | undefined {
-  const route = context.ui.router.current()
-  if (route.type === "session") {
-    return route.sessionID
+// `context.data.session.cost(rootID)` already returns the family total (root
+// + all descendants) and is updated live by the host on every
+// `session.usage.updated` event. But child sessions only land in the store
+// once the host has synced them, so on mount we walk the tree via the
+// supported API (`client.session.list({ parentID })` — there is no
+// `client.session.children`) and sync each child into the store. New
+// subagents created afterwards are auto-synced by the host's
+// `session.created` handler, which also registers them with the family.
+async function seedFamily(client: AnyClient, data: AnyData, rootID: string): Promise<void> {
+  try {
+    await data.session.sync(rootID)
+  } catch {
+    // best effort; the reactive reads below still work
   }
-  return undefined
+  const seen = new Set<string>([rootID])
+  const queue: string[] = [rootID]
+  while (queue.length > 0) {
+    if (seen.size > 500) return
+    const parentID = queue.pop()!
+    let children: Array<{ id: string }> = []
+    try {
+      const response = await client.session.list({ parentID })
+      children = response.data ?? []
+    } catch {
+      continue
+    }
+    for (const child of children) {
+      if (seen.has(child.id)) continue
+      seen.add(child.id)
+      queue.push(child.id)
+      try {
+        await data.session.sync(child.id)
+      } catch {
+        // ignore one bad child
+      }
+    }
+  }
 }
 
-function View() {
+// Reactive spend for one root session. Reads only go through the host data
+// store inside memos, so updates (usage deltas, new children) re-render
+// without any manual polling or event bookkeeping.
+function useSpend(sessionID: () => string | undefined) {
   const context = usePlugin()
-  const theme = context.theme
 
-  const sessionID = createMemo(() => getSessionID(context))
-
-  const tracker = createMemo(() => {
-    const id = sessionID()
-    if (!id) return getTracker("")
-    return getTracker(id)
-  })
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const contextClient: AnyClient = context.client
-
-  // Begin watching a session's subagent spend. Guarded by `started` so it only
-  // ever runs once per tracker no matter how often the view mounts.
-  createMemo(() => {
+  createEffect(() => {
     const id = sessionID()
     if (!id) return
-    const trackerInstance = getTracker(id)
-    if (trackerInstance.started) return
-    trackerInstance.started = true
-
-    let inFlight = false
-    let dirty = false
-    let disposed = false
-
-    async function refresh() {
-      if (disposed) return
-      if (inFlight) {
-        dirty = true
-        return
+    let cancelled = false
+    onCleanup(() => {
+      cancelled = true
+    })
+    void seedFamily(context.client, context.data, id).catch(() => {})
+    // Belt-and-braces for late-joining subagents: adopt any created session
+    // whose parent chain reaches our root. (The host auto-syncs created
+    // sessions too; this just covers sessions the host hasn't registered.)
+    const off = context.data.on("session.created", (event) => {
+      if (cancelled) return
+      const created = event.data as { sessionID: string; parentID?: string }
+      if (!created?.sessionID) return
+      let current = created.parentID
+      let depth = 0
+      while (current && depth < 10) {
+        if (current === id) {
+          void context.data.session.sync(created.sessionID).catch(() => {})
+          return
+        }
+        current = context.data.session.get(current)?.parentID
+        depth += 1
       }
-      inFlight = true
-      dirty = false
-      try {
-        const total = await sumDescendants(contextClient, id!, new Set(), 0)
-        if (!disposed) trackerInstance.setCost(total)
-      } finally {
-        inFlight = false
-        if (dirty && !disposed) void refresh()
-      }
-    }
-
-    // Subagent events may indicate a descendant's spend changed, so recompute the tree
-    // (coalesced to avoid pile-up).
-    const handler = () => {
-      if (disposed) return
-      void refresh()
-    }
-    // Use session idle event as a proxy for when subagent costs are finalized
-    const offIdle = context.data.on("session.idle" as any, handler)
-
-    trackerInstance.dispose = () => {
-      disposed = true
-      offIdle()
-      trackers.delete(id!)
-    }
-
-    void refresh()
+    })
+    onCleanup(off)
   })
 
   const total = createMemo(() => {
     const id = sessionID()
     if (!id) return 0
-    const messages = context.data.session.message.list(id) ?? []
-    const sessionCost = messages.reduce(
-      (total: number, message: any) => total + (message.role === "assistant" ? message.cost ?? 0 : 0),
-      0,
-    )
-    return sessionCost + tracker().cost()
+    return context.data.session.cost(id)
   })
+  const own = createMemo(() => {
+    const id = sessionID()
+    if (!id) return 0
+    return context.data.session.get(id)?.cost ?? 0
+  })
+  const subagents = createMemo(() => Math.max(0, total() - own()))
+
+  return { total, subagents }
+}
+
+function View(props: { input: { sessionID: string } }) {
+  const context = usePlugin()
+  const theme = context.theme
+  const sessionID = createMemo(() => props.input.sessionID)
+  const { total, subagents } = useSpend(sessionID)
 
   return jsxs("box", {
     children: [
@@ -186,90 +155,25 @@ function View() {
           return theme.textMuted
         },
         get children() {
-          return `${money.format(total())} (${money.format(tracker().cost())})`
+          return `${money.format(total())} (${money.format(subagents())})`
         },
       }),
     ],
   })
 }
 
-function PromptFooter() {
+function PromptFooter(props: { input: { sessionID?: string } }) {
   const context = usePlugin()
   const theme = context.theme
-
-  const sessionID = createMemo(() => getSessionID(context))
-
-  const tracker = createMemo(() => {
-    const id = sessionID()
-    if (!id) return getTracker("")
-    return getTracker(id)
-  })
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const contextClient: AnyClient = context.client
-
-  // Begin watching a session's subagent spend. Guarded by `started` so it only
-  // ever runs once per tracker no matter how often the view mounts.
-  createMemo(() => {
-    const id = sessionID()
-    if (!id) return
-    const trackerInstance = getTracker(id)
-    if (trackerInstance.started) return
-    trackerInstance.started = true
-
-    let inFlight = false
-    let dirty = false
-    let disposed = false
-
-    async function refresh() {
-      if (disposed) return
-      if (inFlight) {
-        dirty = true
-        return
-      }
-      inFlight = true
-      dirty = false
-      try {
-        const total = await sumDescendants(contextClient, id!, new Set(), 0)
-        if (!disposed) trackerInstance.setCost(total)
-      } finally {
-        inFlight = false
-        if (dirty && !disposed) void refresh()
-      }
-    }
-
-    const handler = () => {
-      if (disposed) return
-      void refresh()
-    }
-    const offIdle = context.data.on("session.idle" as any, handler)
-
-    trackerInstance.dispose = () => {
-      disposed = true
-      offIdle()
-      trackers.delete(id!)
-    }
-
-    void refresh()
-  })
-
-  const total = createMemo(() => {
-    const id = sessionID()
-    if (!id) return 0
-    const messages = context.data.session.message.list(id) ?? []
-    const sessionCost = messages.reduce(
-      (total: number, message: any) => total + (message.role === "assistant" ? message.cost ?? 0 : 0),
-      0,
-    )
-    return sessionCost + tracker().cost()
-  })
+  const sessionID = createMemo(() => props.input.sessionID)
+  const { total, subagents } = useSpend(sessionID)
 
   return jsx("text", {
     get fg() {
       return theme.textMuted
     },
     get children() {
-      return `${money.format(total())} (${money.format(tracker().cost())})`
+      return `${money.format(total())} (${money.format(subagents())})`
     },
   })
 }
@@ -284,7 +188,8 @@ export default Plugin.define({
     if (showSidebar) {
       context.ui.slot({
         append: "sidebar.content",
-        render: () => jsx(View, {}),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        render: (input) => (jsx as any)(View, { input }),
       })
     }
 
@@ -292,7 +197,8 @@ export default Plugin.define({
       // Use prompt.footer.status for the prompt footer right area
       context.ui.slot({
         append: "prompt.footer.status",
-        render: () => jsx(PromptFooter, {}),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        render: (input) => (jsx as any)(PromptFooter, { input }),
       })
     }
   },
